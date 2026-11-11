@@ -1,175 +1,99 @@
 import os
-import asyncio
-from dotenv import load_dotenv
 from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_groq import ChatGroq
 
-load_dotenv()
+from config import TAVILY_API_KEY, AVIATION_STACK_API_KEY, OPENWEATHER_API_KEY
 
-AVIATION_STACK_API_KEY = os.getenv("AVIATION_STACK_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_API_KEY")
 
-if not TAVILY_API_KEY:
-    raise RuntimeError("TAVILY_API_KEY not found in .env")
-
-if not AVIATION_STACK_API_KEY:
-    raise RuntimeError("AVIATION_STACK_API_KEY not found in .env")
-
-if not OPENWEATHER_API_KEY:
-    raise RuntimeError("OPENWEATHER_API_KEY not found in .env")
-
+# create MCP Client
 client = MultiServerMCPClient({
-    "tavily": {
+    "tavily":{
         "transport": "streamable_http",
-        "url": "https://mcp.tavily.com/mcp",
-        "headers": {"Authorization": f"Bearer {TAVILY_API_KEY}"},
+        "url":"https://mcp.tavily.com/mcp/",
+        "headers":{"Authorization":f"Bearer {TAVILY_API_KEY}"}
     },
-    "aviationstack":{
-            "transport": "stdio",
-            "command":"D:/LangGraph/AI Travel Booking System/aviationstack-mcp/.venv/Scripts/python.exe",
-            "args":[
-                "-m",
-                "aviationstack_mcp",
-                "mcp",
-                "run"
-            ],
-            "env":{
-                "AVIATION_STACK_API_KEY":AVIATION_STACK_API_KEY
-                }
-        },
-        "weather":{
-                    "transport": "stdio",
-                    "command": "D:/LangGraph/AI Travel Booking System/AITravelBooking/Scripts/python.exe",
-                    "args":[
-                        "D:/LangGraph/AI Travel Booking System/custom_weather_mcp_server.py"
-                    ],
-                    "env":{
-                        "OPENWEATHER_API_KEY":OPENWEATHER_API_KEY
-                        }
-                }
+    "aviationStack":{
+        "transport":"stdio",
+        "command":"D:/LangGraph/AI Travel Booking System/aviationstack-mcp/.venv/Scripts/python.exe",
+        "args":[
+            "-m",
+            "aviationstack_mcp",
+            "mcp",
+            "run"
+        ],
+        "env":{ "AVIATION_STACK_API_KEY" : AVIATION_STACK_API_KEY }
+    },
+    "weather":{
+        "transport":"stdio",
+        "command":"D:/LangGraph/AI Travel Booking System/AITravelBooking/Scripts/python.exe",
+        "args":[
+            r"D:/LangGraph/AI Travel Booking System/weather_mcp_server.py"
+        ],
+        "env":{ "OPENWEATHER_API_KEY" : OPENWEATHER_API_KEY }
+    }
 })
 
+# cache tools so we don't load them repeatedly
+_tools_cache = None
 
 
-async def main():
-    tools = await client.get_tools()
-    search_tool = next(
-        tool
-        for tool in tools
-        if tool.name== "tavily_search"
-    )
-    result = await search_tool.ainvoke({
-        "query":"Best hotel in Delhi"
-    })
-    print(result)
+async def get_tools():
+    global _tools_cache
 
-search_tool = None
-aviation_tools = {}
+    if _tools_cache is None:
+        try:
+            _tools_cache = await client.get_tools()
 
-async def initialize_mcp():
-    global search_tool
-    global aviation_tools
+        except Exception as e:
+            print("\n========== FULL ERROR ==========")
+            print(type(e))
+            print(repr(e))
 
-    if search_tool is not None and aviation_tools:
-        return
-    
-    tools = await client.get_tools()
-    search_tool = next(
-            tool
-            for tool in tools
-            if tool.name == "tavily_search"
-        )
-    aviation_tools = next(
-            tool
-            for tool in tools
-            if tool.name != "tavily_search"
-        )
+            if hasattr(e, "exceptions"):
+                print("\nSUB EXCEPTIONS:")
+                for i, sub in enumerate(e.exceptions):
+                    print(f"\n--- Exception {i+1} ---")
+                    print(type(sub))
+                    print(repr(sub))
 
+            raise
 
-async def tavily_mcp_search(query: str):
-    await initialize_mcp()
-    result = await search_tool.ainvoke({"query": query})
-    return result
+    return _tools_cache
 
-async def aviation_mcp_call():
-    tool_name: str
-    tool_args: dict = None
+async def call_tool(tool_name: str, args: dict = None):
+    tools = await get_tools()
 
-    tools = await client.get_tools()
     tool = next(
-                t for t in tools
-                if t.name == tool_name
-                )
-    result = await tool.ainvoke(tool_args or {})
-    return result
+        (tool for tool in tools if tool.name == tool_name),
+        None,
+    )
 
-async def get_airports():
-    await initialize_mcp()
-    tool = aviation_tools.get("list_airports")
-    if not tool:
-        return "Airport tool not available"
-    result = await tool.ainvoke({})
-    return result
+    if tool is None:
+        raise ValueError(f"Tool '{tool_name}' not found")
 
-async def get_airlines():
-    await initialize_mcp()
-
-    tool = aviation_tools.get("list_airlines")
-    if not tool:
-        return "Airline too, not available"
-    result = await tool.ainvoke({})
-    return result
+    return await tool.ainvoke(args or {})
 
 
-weather_tool= None
-forecast_tool = None
-
-async def initialize_weather_tools():
-     global weather_tool, forecast_tool
-
-     if weather_tool is not None:
-        return
-     tools = await client.get_tools()
-
-     weather_tool = next(
-        t for t in tools
-        if t.name == "get_current_weather"
-     )
-
-     forecast_tool = next(
-        t for t in tools
-        if t.name == "get_forecast"
-     )
-
-async def weather_mcp_search(city: str):
-    await initialize_weather_tools()
-    return await weather_tool.ainvoke({
-        "city": city
-    })
-
-async def forecast_mcp_search(city: str):
-    await initialize_weather_tools()
-    return await forecast_tool.ainvoke({
-        "city": city
-    })
-
-llm = ChatGroq(model = "openai/gpt-oss-20b")
-
-def extract_destination(query: str):
-    prompt= f"""
-    Extract only the destination city or country
-
-    User Query: {query}
-
-    Return only destination name
-"""
-
-    response = llm.invoke(prompt)
-
-    return response.content.strip()
+# ------------------------
+# Tavily MCP Tools
+# ------------------------
 
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+async def tavily_search(query: str):
+    return await call_tool("tavily_search", {"query": query})
+
+
+async def list_airports(search: str = "", limit: int = 10):
+    return await call_tool("list_airports", {"search": search, "limit": limit, "offset": 0})
+
+
+async def list_airlines(search: str = "", limit: int = 10):
+    return await call_tool("list_airlines", {"search": search, "limit": limit, "offset": 0})
+
+
+async def current_weather(city: str):
+    return await call_tool("get_current_weather", {"city": city})
+
+
+async def forecast(city: str):
+    return await call_tool("get_forecast", {"city": city})
